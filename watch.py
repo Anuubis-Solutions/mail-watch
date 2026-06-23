@@ -42,7 +42,6 @@ QUOTE_MARKERS = [
 ]
 IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 MESES_ES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
-SEP = "━━━━━━━━━━━━━━━━━━"
 
 
 def log(message):
@@ -116,9 +115,15 @@ def human_date(date_raw):
         dt = email.utils.parsedate_to_datetime(date_raw)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
-        if MADRID is not None:
-            dt = dt.astimezone(MADRID)
-        return f"{dt.day} {MESES_ES[dt.month - 1]} {dt.year}, {dt.hour:02d}:{dt.minute:02d}"
+        tz = MADRID or datetime.timezone.utc
+        dt = dt.astimezone(tz)
+        delta = (datetime.datetime.now(tz).date() - dt.date()).days
+        hhmm = f"{dt.hour:02d}:{dt.minute:02d}"
+        if delta == 0:
+            return f"hoy {hhmm}"
+        if delta == 1:
+            return f"ayer {hhmm}"
+        return f"{dt.day} {MESES_ES[dt.month - 1]} {dt.year}, {hhmm}"
     except (TypeError, ValueError):
         return (date_raw or "")[:31]
 
@@ -158,25 +163,21 @@ def extract_preview(message, limit=220):
 
 def build_notice(items, total_unseen=None):
     n = len(items)
-    cuenta = f"*{n} correos nuevos*" if n > 1 else "*1 correo nuevo*"
-    lines = [f"👋 Hola Alex — tienes {cuenta} sin leer:", ""]
+    cab = f"📬  *Tienes {n} correos nuevos*" if n > 1 else "📬  *Tienes 1 correo nuevo*"
+    lines = [cab, ""]
     for it in items:
         quien = it["from_name"] or it["from_email"] or "(desconocido)"
-        lines.append(SEP)
-        lines.append(f"📩  *{quien}*")
-        if it["from_email"]:
-            lines.append(f"✉️  {it['from_email']}")
-        lines.append(f"📌  {it['subject'] or '(sin asunto)'}")
-        lines.append(f"🕒  {it['date_human']}")
-        if it.get("preview"):
-            lines.append(f"📝  _{it['preview']}_")
+        lines.append(f"*{it['subject'] or '(sin asunto)'}*")
+        lines.append(f"De {quien} · {it['date_human']}")
         lines.append("")
-    lines.append(SEP)
+        if it.get("preview"):
+            lines.append(f"💬  _{it['preview']}_")
+            lines.append("")
     if total_unseen and total_unseen > n:
-        lines.append(f"📥  En total hay {total_unseen} correos sin leer en la bandeja.")
-    lines.append("")
-    lines.append("🔕  El watcher se ha apagado solo — no gasta más minutos.")
-    lines.append("▶️  Para volver a vigilar: `tools/mailwatch.sh on`")
+        lines.append(f"📥  {total_unseen} sin leer en total en la bandeja.")
+        lines.append("")
+    lines.append("— Watcher pausado (no gasta minutos).")
+    lines.append("`tools/mailwatch.sh on` para seguir vigilando.")
     return "\n".join(lines)
 
 
