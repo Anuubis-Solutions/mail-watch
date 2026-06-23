@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Watcher de bandeja IMAP. Comprueba si hay correo NUEVO de un humano desde un
 baseline temporal (WATCH_SINCE, epoch UTC fijado al encender el watcher). No usa
-Claude: solo cabeceras IMAP. Escribe watch.json (resultado) y notice.txt (aviso
+Claude: solo IMAP. Escribe watch.json (resultado) y notice.txt (aviso formateado
 para Google Chat) cuando hay novedades. Persiste los Message-ID ya avisados en
 state/seen.json para no repetir. STDLIB only.
 
@@ -20,11 +20,29 @@ import os
 import re
 import sys
 
+try:
+    from zoneinfo import ZoneInfo
+    MADRID = ZoneInfo("Europe/Madrid")
+except Exception:
+    MADRID = None
+
 AUTOMATED_SENDER_RE = re.compile(
     r"(?:no-reply|noreply|no_reply|mailer-daemon|postmaster|donotreply|notifications|bounce)",
     re.IGNORECASE,
 )
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+SPACE_RE = re.compile(r"\s+")
+QUOTE_MARKERS = [
+    re.compile(r"\n\s*>"),
+    re.compile(r"\n\s*El\s.{0,140}?escribió:", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\n\s*On\s.{0,140}?wrote:", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\n-{4,}\s*Original", re.IGNORECASE),
+    re.compile(r"\n\s*De:\s.{0,80}\n\s*Enviado:", re.IGNORECASE),
+    re.compile(r"\n_{5,}"),
+]
 IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+MESES_ES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
+SEP = "━━━━━━━━━━━━━━━━━━"
 
 
 def log(message):
@@ -73,8 +91,8 @@ def imap_since_date(epoch, fallback_days):
     return f"{day.day:02d}-{IMAP_MONTHS[day.month - 1]}-{day.year:04d}"
 
 
-def fetch_header(mailbox, uid):
-    status, data = mailbox.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+def fetch_message(mailbox, uid):
+    status, data = mailbox.uid("fetch", uid, "(BODY.PEEK[])")
     if status != "OK":
         return None
     for item in data or []:
@@ -93,19 +111,80 @@ def email_epoch(date_raw):
         return None
 
 
-def build_notice(items):
-    plural = "correos nuevos" if len(items) > 1 else "correo nuevo"
-    lines = [f"Tienes {len(items)} {plural} en la bandeja:", ""]
+def human_date(date_raw):
+    try:
+        dt = email.utils.parsedate_to_datetime(date_raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        if MADRID is not None:
+            dt = dt.astimezone(MADRID)
+        return f"{dt.day} {MESES_ES[dt.month - 1]} {dt.year}, {dt.hour:02d}:{dt.minute:02d}"
+    except (TypeError, ValueError):
+        return (date_raw or "")[:31]
+
+
+def extract_preview(message, limit=220):
+    text = ""
+    if message.is_multipart():
+        for part in message.walk():
+            disp = str(part.get("Content-Disposition", ""))
+            if part.get_content_type() == "text/plain" and "attachment" not in disp:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    text = payload.decode(part.get_content_charset() or "utf-8", "replace")
+                    break
+        if not text:
+            for part in message.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        raw = payload.decode(part.get_content_charset() or "utf-8", "replace")
+                        text = HTML_TAG_RE.sub(" ", raw)
+                        break
+    else:
+        payload = message.get_payload(decode=True)
+        if payload:
+            text = payload.decode(message.get_content_charset() or "utf-8", "replace")
+            if message.get_content_type() == "text/html":
+                text = HTML_TAG_RE.sub(" ", text)
+    cuts = [m.start() for m in (rx.search(text) for rx in QUOTE_MARKERS) if m]
+    if cuts:
+        text = text[:min(cuts)]
+    text = SPACE_RE.sub(" ", text).strip()
+    if not text:
+        return ""
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def build_notice(items, total_unseen=None):
+    n = len(items)
+    cuenta = f"*{n} correos nuevos*" if n > 1 else "*1 correo nuevo*"
+    lines = [f"👋 Hola Alex — tienes {cuenta} sin leer:", ""]
     for it in items:
         quien = it["from_name"] or it["from_email"] or "(desconocido)"
-        asunto = it["subject"] or "(sin asunto)"
-        lines.append(f"  De: {quien}  <{it['from_email']}>")
-        lines.append(f"  Asunto: {asunto}")
-        lines.append(f"  Fecha: {it['date']}")
+        lines.append(SEP)
+        lines.append(f"📩  *{quien}*")
+        if it["from_email"]:
+            lines.append(f"✉️  {it['from_email']}")
+        lines.append(f"📌  {it['subject'] or '(sin asunto)'}")
+        lines.append(f"🕒  {it['date_human']}")
+        if it.get("preview"):
+            lines.append(f"📝  _{it['preview']}_")
         lines.append("")
-    lines.append("El watcher se ha apagado solo (no gasta mas minutos).")
-    lines.append("Para volver a vigilar: tools/mailwatch.sh on")
+    lines.append(SEP)
+    if total_unseen and total_unseen > n:
+        lines.append(f"📥  En total hay {total_unseen} correos sin leer en la bandeja.")
+    lines.append("")
+    lines.append("🔕  El watcher se ha apagado solo — no gasta más minutos.")
+    lines.append("▶️  Para volver a vigilar: `tools/mailwatch.sh on`")
     return "\n".join(lines)
+
+
+def count_unseen(mailbox):
+    status, data = mailbox.uid("search", None, "(UNSEEN)")
+    if status != "OK" or not data or not data[0]:
+        return 0
+    return len(data[0].split())
 
 
 def main():
@@ -130,7 +209,7 @@ def main():
 
         items = []
         for uid in uids:
-            message = fetch_header(mailbox, uid)
+            message = fetch_message(mailbox, uid)
             if message is None:
                 continue
             from_value = decode_hdr(message.get("From", ""))
@@ -151,26 +230,29 @@ def main():
                 "from_email": from_email,
                 "subject": decode_hdr(message.get("Subject", "")),
                 "date": date_raw,
+                "date_human": human_date(date_raw),
+                "preview": extract_preview(message),
             })
+        total_unseen = count_unseen(mailbox)
     finally:
         try:
             mailbox.logout()
         except Exception:
             pass
 
-    result = {"checked": len(uids), "new_human": len(items), "items": items}
+    result = {"checked": len(uids), "new_human": len(items), "total_unseen": total_unseen, "items": items}
     with open(args.out, "w", encoding="utf-8") as handle:
         json.dump(result, handle, ensure_ascii=False, indent=2)
 
     if items:
         with open(args.notice, "w", encoding="utf-8") as handle:
-            handle.write(build_notice(items))
+            handle.write(build_notice(items, total_unseen))
         for it in items:
             if it["message_id"]:
                 seen.add(it["message_id"])
         save_seen(args.state, seen)
 
-    log(f"checked={len(uids)} new_human={len(items)} since_epoch={since_epoch}")
+    log(f"checked={len(uids)} new_human={len(items)} total_unseen={total_unseen} since_epoch={since_epoch}")
 
 
 if __name__ == "__main__":
