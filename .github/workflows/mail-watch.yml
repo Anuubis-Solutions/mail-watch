@@ -1,0 +1,65 @@
+name: mail-watch
+
+# Comprueba la bandeja de IMAP_USER cada 2h. Si hay correo nuevo de un humano
+# (desde el baseline WATCH_SINCE), avisa por Google Chat y se auto-deshabilita.
+# Repo PUBLICO -> Actions gratis e ilimitado. Los secretos viven en Settings.
+# Encender/apagar: tools/mailwatch.sh on|off (o boton Enable/Disable en Actions).
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # cada 2 horas
+  workflow_dispatch:        # disparo manual (test / primera comprobacion)
+
+permissions:
+  contents: write           # persistir state/seen.json
+  actions: write            # auto-deshabilitarse al encontrar correo
+
+concurrency:
+  group: mail-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    env:
+      IMAP_HOST: imap.ionos.es
+      IMAP_PORT: '993'
+      IMAP_USER: ${{ secrets.WATCH_IMAP_USER }}
+      IMAP_PASS: ${{ secrets.WATCH_IMAP_PASS }}
+      WATCH_SINCE: ${{ vars.WATCH_SINCE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Comprobar bandeja (IMAP read-only)
+        id: check
+        run: |
+          python3 watch.py --out watch.json --notice notice.txt --state state/seen.json
+          echo "new_human=$(python3 -c "import json;print(json.load(open('watch.json'))['new_human'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Avisar por Google Chat
+        if: steps.check.outputs.new_human != '0'
+        env:
+          GCHAT_CREDENTIALS: ${{ secrets.GCHAT_CREDENTIALS }}
+          GCHAT_TOKEN: ${{ secrets.GCHAT_TOKEN }}
+        run: python3 gchat_send.py --email "${{ vars.WATCH_NOTIFY_EMAIL }}" --text-file notice.txt
+
+      - name: Persistir seen.json
+        if: steps.check.outputs.new_human != '0'
+        run: |
+          git config user.name "mail-watch"
+          git config user.email "bot@anubis.es"
+          git add state/seen.json
+          git commit -m "chore: seen $(date -u +%F-%H%M)" || echo "sin cambios"
+          git push || echo "push fallo"
+
+      - name: Auto-apagar el watcher
+        if: steps.check.outputs.new_human != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow disable mail-watch.yml -R "${{ github.repository }}"
+          echo "Watcher deshabilitado: ya hay correo nuevo. Reactivar con tools/mailwatch.sh on"

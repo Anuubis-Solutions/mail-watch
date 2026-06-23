@@ -1,0 +1,5 @@
+.env
+watch.json
+notice.txt
+__pycache__/
+*.pyc
