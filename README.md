@@ -1,5 +1,15 @@
 # mail-watch
 
+> **DEPRECADO (2026-07-14).** Se pisaba con `alex-mail-triage`, que corre cada 8 min
+> sobre el mismo buzón `alex@anubis.es` y mueve correos a `Notificaciones` — cuando
+> `mail-watch` despertaba cada 2h a buscar `UNSEEN` en INBOX, el correo ya se había
+> movido y no lo veía (caso real: el correo de Ricardo/animefan.es del 13-jul apareció
+> en `Notificaciones`, no INBOX). Su función (avisar de correo importante) la cubre
+> ahora `alex-mail-triage` v2: aviso inmediato de `importance: alta` + digest agrupado
+> 3×/día por Google Chat. Ver `src/Anubis/alex-mail-triage/README.md`. Repo no borrado,
+> solo apagado (`tools/mailwatch.sh off`) — queda el código por si algún día hace falta
+> vigilar un buzón AJENO a alex-mail-triage (ese caso sí seguiría siendo válido).
+
 Watcher de bandeja de correo bajo demanda. Comprueba un buzón IMAP cada 2 horas y,
 en cuanto llega correo nuevo de un humano, avisa por Google Chat y **se apaga solo**.
 

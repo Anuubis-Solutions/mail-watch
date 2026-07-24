@@ -3,3 +3,6 @@ watch.json
 notice.txt
 __pycache__/
 *.pyc
+
+# backups de rotacion de credenciales — NUNCA al remoto
+.env*
